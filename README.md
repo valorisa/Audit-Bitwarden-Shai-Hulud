@@ -1,4 +1,4 @@
-# audit-bitwarden-shai-hulud
+# Audit-Bitwarden-Shai-Hulud
 
 Outils d'audit pour la compromission de supply-chain `@bitwarden/cli@2026.4.0`
 (**Shai-Hulud: The Third Coming**) — détection locale et sur GitHub Actions.
