@@ -7,6 +7,7 @@ Outils d'audit pour la compromission de supply-chain `@bitwarden/cli@2026.4.0`
 [![PowerShell 7+](https://img.shields.io/badge/PowerShell-7.6+-blue.svg)](https://github.com/PowerShell/PowerShell)
 [![Bash](https://img.shields.io/badge/Shell-Bash%205%2B-green.svg)](https://www.gnu.org/software/bash/)
 [![GitHub Actions](https://img.shields.io/badge/GitHub-Actions-2088FF.svg)](https://github.com/features/actions)
+[![Audit Bitwarden CLI 2026.4.0 (Shai‑Hulud)](https://github.com/valorisa/Audit-Bitwarden-Shai-Hulud/actions/workflows/audit-bitwarden-2026.4.0.yml/badge.svg)](https://github.com/valorisa/Audit-Bitwarden-Shai-Hulud/actions/workflows/audit-bitwarden-2026.4.0.yml)
 
 ---
 
