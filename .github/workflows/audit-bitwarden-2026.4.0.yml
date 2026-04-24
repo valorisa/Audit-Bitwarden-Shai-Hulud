@@ -2,10 +2,16 @@
 # .github/workflows/audit-bitwarden-2026.4.0.yml
 #
 # Audit supply-chain — @bitwarden/cli@2026.4.0 (Shai-Hulud: The Third Coming)
-# CORRECTIONS APPLIQUÉES :
-#   • Remplacement de $(gh api /user) par ${GITHUB_REPOSITORY_OWNER} (natif Actions)
-#   • Suppression des validations $RESPONSE non définies
-#   • Ajout d'une validation robuste du JSON retourné par l'API GitHub
+#
+# COMMENT CIBLER UN SOUS-ENSEMBLE DE REPOS :
+#   Trois modes disponibles, configurables via les variables en haut du fichier.
+#
+#   MODE 1 — Liste manuelle : REPO_LIST (ex. "org/repo-a,org/repo-b")
+#   MODE 2 — Topic GitHub   : REPO_TOPIC (ex. "production", "backend")
+#   MODE 3 — Tous (fallback): si REPO_LIST et REPO_TOPIC sont vides
+#
+# SECRETS requis :
+#   PERSONAL_PAT — token GitHub avec scopes : repo, read:org (si org privée)
 # =============================================================================
 
 name: "Audit Bitwarden CLI 2026.4.0 (Shai‑Hulud)"
@@ -48,6 +54,7 @@ permissions:
   actions: read
 
 jobs:
+  # ── Job 1 : Construire la liste des repos à scanner ─────────────────────────
   build-repo-list:
     name: "Sélection des repos"
     runs-on: ubuntu-latest
@@ -82,50 +89,50 @@ jobs:
                 exit 1
               fi
               echo "Recherche des repos avec le topic : $REPO_TOPIC"
-              
+
               # ✅ CORRECTION : Utiliser GITHUB_REPOSITORY_OWNER (natif Actions) au lieu de gh api
               RESPONSE=$(curl -s -w "\n%{http_code}" \
                 -H "Authorization: Bearer $GH_TOKEN" \
                 -H "Accept: application/vnd.github.mercy-preview+json" \
                 "https://api.github.com/search/repositories?q=topic:${REPO_TOPIC}+user:${GITHUB_REPOSITORY_OWNER}&per_page=$MAX_REPOS")
-              
+
               HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
               BODY=$(echo "$RESPONSE" | sed '$d')
-              
+
               if [[ "$HTTP_CODE" -ne 200 ]]; then
                 echo "::error::GitHub API error (HTTP $HTTP_CODE): $BODY"
                 exit 1
               fi
-              
+
               if ! echo "$BODY" | jq empty 2>/dev/null; then
                 echo "::error::GitHub API returned invalid JSON"
                 exit 1
               fi
-              
-              REPOS_JSON=$(echo "$BODY" | jq '[.items[].full_name] // []')
+
+              REPOS_JSON=$(echo "$BODY" | jq -c '[.items[].full_name] // []')
               ;;
 
             all)
               echo "Récupération de tous les repos (max $MAX_REPOS)..."
-              
+
               RESPONSE=$(curl -s -w "\n%{http_code}" \
                 -H "Authorization: Bearer $GH_TOKEN" \
                 "https://api.github.com/user/repos?visibility=all&per_page=$MAX_REPOS&sort=pushed")
-              
+
               HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
               BODY=$(echo "$RESPONSE" | sed '$d')
-              
+
               if [[ "$HTTP_CODE" -ne 200 ]]; then
                 echo "::error::GitHub API error (HTTP $HTTP_CODE): $BODY"
                 exit 1
               fi
-              
+
               if ! echo "$BODY" | jq empty 2>/dev/null; then
                 echo "::error::GitHub API returned invalid JSON"
                 exit 1
               fi
-              
-              REPOS_JSON=$(echo "$BODY" | jq '[.[].full_name] // []')
+
+              REPOS_JSON=$(echo "$BODY" | jq -c '[.[].full_name] // []')
               ;;
           esac
 
@@ -133,7 +140,8 @@ jobs:
           echo "Repos sélectionnés : $COUNT"
           echo "$REPOS_JSON" | jq -r '.[]' | sed 's/^/  - /'
 
-          echo "repos=$REPOS_JSON" >> "$GITHUB_OUTPUT"
+          # ✅ CORRECTION : Minifier le JSON pour GitHub Actions output (compatible multi-lignes)
+          echo "repos=$(echo "$REPOS_JSON" | jq -c '.')" >> "$GITHUB_OUTPUT"
           echo "count=$COUNT" >> "$GITHUB_OUTPUT"
 
       - name: "Dry-run — affichage seul"
@@ -143,6 +151,7 @@ jobs:
           echo "Repos qui auraient été scannés :"
           echo '${{ steps.select.outputs.repos }}' | jq -r '.[]' | sed 's/^/  - /'
 
+  # ── Job 2 : Scan de chaque repo ─────────────────────────────────────────────
   scan:
     name: "Scan — ${{ matrix.repo }}"
     needs: build-repo-list
@@ -150,6 +159,7 @@ jobs:
       needs.build-repo-list.outputs.count > 0 &&
       github.event.inputs.dry_run != 'true'
     runs-on: ubuntu-latest
+
     strategy:
       fail-fast: false
       max-parallel: 5
@@ -179,6 +189,7 @@ jobs:
             \( -name "package.json" -o -name "package-lock.json" -o -name "yarn.lock" \) \
             -not -path "*/node_modules/*" \
             -exec grep -l "bitwarden.*2026\.4\.0\|2026\.4\.0.*bitwarden" {} \; 2>/dev/null || true)
+
           if [[ -n "$HITS" ]]; then
             echo "::error::[$REPO] 🚨 @bitwarden/cli@2026.4.0 trouvé dans :"
             echo "$HITS" | sed "s|repo/||g" | xargs -I{} echo "  - {}"
@@ -192,6 +203,7 @@ jobs:
           REPO="${{ matrix.repo }}"
           HITS=$(find repo -type f \( -name "bw1.js" -o -name "bw_setup.js" \) \
             -not -path "*/node_modules/*" 2>/dev/null || true)
+
           if [[ -n "$HITS" ]]; then
             echo "::error::[$REPO] 🚨 Fichier malware détecté :"
             echo "$HITS" | sed "s|repo/||g" | xargs -I{} echo "  - {}"
@@ -207,9 +219,11 @@ jobs:
             echo "[$REPO] ℹ Pas de dossier .github/workflows"
             exit 0
           fi
+
           PATTERN="audit\.checkmarx|Shai-Hulud|RunCredentialHarvester|LongLiveTheResistance|bw1\.js|bw_setup\.js"
           HITS=$(find repo/.github/workflows -type f \( -name "*.yml" -o -name "*.yaml" \) \
             -exec grep -lE "$PATTERN" {} \; 2>/dev/null || true)
+
           if [[ -n "$HITS" ]]; then
             echo "::error::[$REPO] 🚨 Workflow(s) suspect(s) :"
             echo "$HITS" | sed "s|repo/||g" | xargs -I{} echo "  - {}"
@@ -221,11 +235,13 @@ jobs:
         if: always()
         run: rm -rf repo
 
+  # ── Job 3 : Rapport de synthèse ─────────────────────────────────────────────
   summary:
     name: "Rapport de synthèse"
     needs: [build-repo-list, scan]
     if: always()
     runs-on: ubuntu-latest
+
     steps:
       - name: "Résumé"
         run: |
