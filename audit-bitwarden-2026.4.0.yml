@@ -1,0 +1,252 @@
+# =============================================================================
+# .github/workflows/audit-bitwarden-2026.4.0.yml
+#
+# Audit supply-chain — @bitwarden/cli@2026.4.0 (Shai-Hulud: The Third Coming)
+#
+# COMMENT CIBLER UN SOUS-ENSEMBLE DE REPOS :
+#   Trois modes disponibles, configurables via les variables en haut du fichier.
+#
+#   MODE 1 — Liste manuelle : REPO_LIST (ex. "org/repo-a,org/repo-b")
+#   MODE 2 — Topic GitHub   : REPO_TOPIC (ex. "production", "backend")
+#   MODE 3 — Tous (fallback): si REPO_LIST et REPO_TOPIC sont vides
+#
+# SECRETS requis :
+#   PERSONAL_PAT — token GitHub avec scopes : repo, read:org (si org privée)
+# =============================================================================
+
+name: "Audit Bitwarden CLI 2026.4.0 (Shai‑Hulud)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      scan_mode:
+        description: "Mode de scan"
+        required: true
+        default: "topic"
+        type: choice
+        options:
+          - list       # Utilise REPO_LIST ci-dessous
+          - topic      # Utilise REPO_TOPIC ci-dessous
+          - all        # Tous les repos accessibles (attention : coûteux)
+      dry_run:
+        description: "Dry-run (affiche les repos sélectionnés sans scanner)"
+        required: false
+        default: "false"
+        type: boolean
+
+  schedule:
+    - cron: "0 3 * * *"   # Tous les jours à 3h UTC
+
+# ── Variables à personnaliser ────────────────────────────────────────────────
+env:
+  # MODE 1 — Liste explicite de repos (format : owner/repo, séparés par des virgules)
+  # Exemple : "monorg/api,monorg/frontend,monorg/infra-scripts"
+  REPO_LIST: ""
+
+  # MODE 2 — Topic GitHub appliqué sur vos repos
+  # Exemple : "production" pour ne scanner que les repos taggués "production"
+  REPO_TOPIC: "production"
+
+  # Nombre max de repos à scanner en mode "topic" ou "all" (sécurité anti-runaway)
+  MAX_REPOS: "50"
+
+  # Patterns Shai-Hulud à chercher dans les workflows GitHub
+  SHAI_HULUD_PATTERNS: >-
+    audit\.checkmarx
+    Shai-Hulud
+    RunCredentialHarvester
+    LongLiveTheResistance
+    bw1\.js
+    bw_setup\.js
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  # ── Job 1 : Construire la liste des repos à scanner ─────────────────────────
+  build-repo-list:
+    name: "Sélection des repos"
+    runs-on: ubuntu-latest
+    outputs:
+      repos: ${{ steps.select.outputs.repos }}
+      count: ${{ steps.select.outputs.count }}
+
+    steps:
+      - name: "Sélection des repos selon le mode"
+        id: select
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_PAT }}
+          SCAN_MODE: ${{ github.event.inputs.scan_mode || 'topic' }}
+        run: |
+          set -euo pipefail
+
+          echo "Mode de scan : $SCAN_MODE"
+          REPOS_JSON="[]"
+
+          case "$SCAN_MODE" in
+
+            list)
+              # MODE 1 — Liste manuelle
+              if [[ -z "$REPO_LIST" ]]; then
+                echo "::error::REPO_LIST est vide — définissez-le dans les variables d'env."
+                exit 1
+              fi
+              REPOS_JSON=$(echo "$REPO_LIST" | tr ',' '\n' | \
+                jq -Rn '[inputs | select(length > 0)]')
+              ;;
+
+            topic)
+              # MODE 2 — Topic GitHub
+              if [[ -z "$REPO_TOPIC" ]]; then
+                echo "::error::REPO_TOPIC est vide — définissez-le dans les variables d'env."
+                exit 1
+              fi
+              echo "Recherche des repos avec le topic : $REPO_TOPIC"
+              REPOS_JSON=$(curl -s \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                -H "Accept: application/vnd.github.mercy-preview+json" \
+                "https://api.github.com/search/repositories?q=topic:${REPO_TOPIC}+user:$(gh api /user --jq .login)&per_page=$MAX_REPOS" \
+                | jq '[.items[].full_name]')
+              ;;
+
+            all)
+              # MODE 3 — Tous les repos (limité à MAX_REPOS)
+              echo "Récupération de tous les repos (max $MAX_REPOS)..."
+              REPOS_JSON=$(curl -s \
+                -H "Authorization: Bearer $GH_TOKEN" \
+                "https://api.github.com/user/repos?visibility=all&per_page=$MAX_REPOS&sort=pushed" \
+                | jq '[.[].full_name]')
+              ;;
+          esac
+
+          COUNT=$(echo "$REPOS_JSON" | jq 'length')
+          echo "Repos sélectionnés : $COUNT"
+          echo "$REPOS_JSON" | jq -r '.[]' | sed 's/^/  - /'
+
+          echo "repos=$REPOS_JSON" >> "$GITHUB_OUTPUT"
+          echo "count=$COUNT"      >> "$GITHUB_OUTPUT"
+
+      - name: "Dry-run — affichage seul"
+        if: ${{ github.event.inputs.dry_run == 'true' }}
+        run: |
+          echo "::notice::DRY-RUN activé — aucun scan effectué."
+          echo "Repos qui auraient été scannés :"
+          echo '${{ steps.select.outputs.repos }}' | jq -r '.[]' | sed 's/^/  - /'
+
+  # ── Job 2 : Scan de chaque repo ─────────────────────────────────────────────
+  scan:
+    name: "Scan — ${{ matrix.repo }}"
+    needs: build-repo-list
+    if: >
+      needs.build-repo-list.outputs.count > 0 &&
+      github.event.inputs.dry_run != 'true'
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false     # Continuer même si un repo échoue
+      max-parallel: 5      # Limiter les clones simultanés
+      matrix:
+        repo: ${{ fromJson(needs.build-repo-list.outputs.repos) }}
+
+    steps:
+      - name: "Cloner ${{ matrix.repo }} (shallow)"
+        id: clone
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_PAT }}
+        run: |
+          git clone --depth=1 \
+            "https://oauth2:$GH_TOKEN@github.com/${{ matrix.repo }}" \
+            repo 2>/dev/null && echo "cloned=true" >> "$GITHUB_OUTPUT" \
+                             || echo "cloned=false" >> "$GITHUB_OUTPUT"
+
+      - name: "Skip si clone échoué"
+        if: steps.clone.outputs.cloned == 'false'
+        run: echo "::warning::Impossible de cloner ${{ matrix.repo }} — ignoré."
+
+      - name: "1. Vérifier @bitwarden/cli@2026.4.0 dans les fichiers de lock"
+        if: steps.clone.outputs.cloned == 'true'
+        run: |
+          REPO="${{ matrix.repo }}"
+          HITS=$(find repo -type f \
+            \( -name "package.json" -o -name "package-lock.json" -o -name "yarn.lock" \) \
+            -not -path "*/node_modules/*" \
+            -exec grep -l "bitwarden.*2026\.4\.0\|2026\.4\.0.*bitwarden" {} \; 2>/dev/null || true)
+
+          if [[ -n "$HITS" ]]; then
+            echo "::error::[$REPO] 🚨 @bitwarden/cli@2026.4.0 trouvé dans :"
+            echo "$HITS" | sed "s|repo/||g" | xargs -I{} echo "  - {}"
+          else
+            echo "[$REPO] ✓ Pas de référence à 2026.4.0"
+          fi
+
+      - name: "2. Rechercher bw1.js / bw_setup.js"
+        if: steps.clone.outputs.cloned == 'true'
+        run: |
+          REPO="${{ matrix.repo }}"
+          HITS=$(find repo -type f \( -name "bw1.js" -o -name "bw_setup.js" \) \
+            -not -path "*/node_modules/*" 2>/dev/null || true)
+
+          if [[ -n "$HITS" ]]; then
+            echo "::error::[$REPO] 🚨 Fichier malware détecté :"
+            echo "$HITS" | sed "s|repo/||g" | xargs -I{} echo "  - {}"
+          else
+            echo "[$REPO] ✓ Pas de bw1.js / bw_setup.js"
+          fi
+
+      - name: "3. Rechercher patterns Shai-Hulud dans les workflows"
+        if: steps.clone.outputs.cloned == 'true'
+        run: |
+          REPO="${{ matrix.repo }}"
+          if [[ ! -d "repo/.github/workflows" ]]; then
+            echo "[$REPO] ℹ Pas de dossier .github/workflows"
+            exit 0
+          fi
+
+          PATTERN="audit\.checkmarx|Shai-Hulud|RunCredentialHarvester|LongLiveTheResistance|bw1\.js|bw_setup\.js"
+          HITS=$(find repo/.github/workflows -type f \( -name "*.yml" -o -name "*.yaml" \) \
+            -exec grep -lE "$PATTERN" {} \; 2>/dev/null || true)
+
+          if [[ -n "$HITS" ]]; then
+            echo "::error::[$REPO] 🚨 Workflow(s) suspect(s) :"
+            echo "$HITS" | sed "s|repo/||g" | xargs -I{} echo "  - {}"
+          else
+            echo "[$REPO] ✓ Workflows GitHub propres"
+          fi
+
+      - name: "Nettoyer le clone"
+        if: always()
+        run: rm -rf repo
+
+  # ── Job 3 : Rapport de synthèse ─────────────────────────────────────────────
+  summary:
+    name: "Rapport de synthèse"
+    needs: [build-repo-list, scan]
+    if: always()
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Résumé"
+        run: |
+          echo "## Audit Bitwarden CLI 2026.4.0 (Shai‑Hulud)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Paramètre | Valeur |" >> $GITHUB_STEP_SUMMARY
+          echo "|---|---|" >> $GITHUB_STEP_SUMMARY
+          echo "| Date | $(date -u '+%Y-%m-%d %H:%M UTC') |" >> $GITHUB_STEP_SUMMARY
+          echo "| Mode | ${{ github.event.inputs.scan_mode || 'topic (schedule)' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Repos scannés | ${{ needs.build-repo-list.outputs.count }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| Statut scan | ${{ needs.scan.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [[ "${{ needs.scan.result }}" == "failure" ]]; then
+            echo "### 🚨 Des alertes ont été détectées !" >> $GITHUB_STEP_SUMMARY
+            echo "Consultez les logs de chaque job pour le détail." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "**Actions immédiates :**" >> $GITHUB_STEP_SUMMARY
+            echo "1. Supprimer \`@bitwarden/cli@2026.4.0\` de tous les projets concernés" >> $GITHUB_STEP_SUMMARY
+            echo "2. Révoquer les tokens GitHub, npm, AWS, Azure" >> $GITHUB_STEP_SUMMARY
+            echo "3. Régénérer les clés SSH" >> $GITHUB_STEP_SUMMARY
+            echo "4. Supprimer les workflows suspects injectés" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "### ✅ Aucune alerte détectée" >> $GITHUB_STEP_SUMMARY
+          fi
